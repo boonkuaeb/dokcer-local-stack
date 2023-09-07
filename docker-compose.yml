@@ -4,8 +4,7 @@ services:
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:7.5.2
     container_name: elasticsearch
-    networks:
-      - localstack-network
+
     ports:
       - 9200:9200
       - 9300:9300
@@ -15,8 +14,7 @@ services:
   kibana:
     image: docker.elastic.co/kibana/kibana:7.5.2
     container_name: kibana
-    networks:
-      - localstack-network
+
     ports:
       - 5601:5601
     environment:
@@ -24,40 +22,34 @@ services:
     depends_on:
       - elasticsearch
 
-  kafka-zookeeper:
-    image: openzipkin/zipkin-kafka
-    container_name: kafka-zookeeper
-    environment:
-      - KAFKA_ADVERTISED_HOST_NAME=192.168.0.102
-    networks:
-      - localstack-network
+  kafka:
+    image: wurstmeister/kafka:2.12-2.5.0
+    container_name: kafka
+    mem_limit: 512m
     ports:
-      - 2181:2181
-      - 9092:9092
-      - 19092:19092
-
-  zipkin:
-    image: openzipkin/zipkin
-    container_name: zipkin
-    networks:
-      - localstack-network
+      - "9092:9092"
     environment:
-      - STORAGE_TYPE=elasticsearch
-      - ES_HOSTS=elasticsearch:9200
-      - KAFKA_BOOTSTRAP_SERVERS=kafka-zookeeper:9092
-    ports:
-      - 9411:9411
+      - KAFKA_ADVERTISED_HOST_NAME=kafka
+      - KAFKA_ADVERTISED_PORT=9092
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
     depends_on:
-      - elasticsearch
-      - kafka-zookeeper
+      - zookeeper
+
+  zookeeper:
+    image: wurstmeister/zookeeper:3.4.6
+    container_name: zookeeper
+    mem_limit: 512m
+    ports:
+      - "2181:2181"
+    environment:
+      - KAFKA_ADVERTISED_HOST_NAME=zookeeper
 
   # $ mongo
   mongodb:
     container_name: mongodb
     image: mongo:3.6.9
     mem_limit: 350m
-    networks:
-      - localstack-network
+
     ports:
       - "27017:27017"
     command: mongod --smallfiles
@@ -72,8 +64,7 @@ services:
     image: mysql:8.0.20
     container_name: mysql
     mem_limit: 350m
-    networks:
-      - localstack-network
+
     ports:
       - "3307:3306"
     environment:
@@ -83,8 +74,70 @@ services:
       interval: 20s
       timeout: 5s
       retries: 10
+      
+  kafka-ui:
+    container_name: kafka-ui
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - 5777:8080
+    depends_on:
+      - kafka
+      - schemaregistry0
+      - kafka-connect0
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_METRICS_PORT: 9997
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schemaregistry0:8085
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: first
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect0:8083
+      DYNAMIC_CONFIG_ENABLED: 'true'
+  schemaregistry0:
+    image: confluentinc/cp-schema-registry:7.2.1
+    ports:
+      - 8085:8085
+    depends_on:
+      - kafka
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: PLAINTEXT
+      SCHEMA_REGISTRY_HOST_NAME: schemaregistry0
+      SCHEMA_REGISTRY_LISTENERS: http://schemaregistry0:8085
 
-
-networks:
-  localstack-network:
-    name: localstack-network
+      SCHEMA_REGISTRY_SCHEMA_REGISTRY_INTER_INSTANCE_PROTOCOL: "http"
+      SCHEMA_REGISTRY_LOG4J_ROOT_LOGLEVEL: INFO
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas
+  kafka-connect0:
+    image: confluentinc/cp-kafka-connect:7.2.1
+    ports:
+      - 8083:8083
+    depends_on:
+      - kafka
+      - schemaregistry0
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      CONNECT_GROUP_ID: compose-connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: _connect_configs
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_TOPIC: _connect_offset
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_TOPIC: _connect_status
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schemaregistry0:8085
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schemaregistry0:8085
+      CONNECT_INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect0
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+  kafka-init-topics:
+    image: confluentinc/cp-kafka:7.2.1
+    volumes:
+       - ./data/message.json:/data/message.json
+    depends_on:
+      - kafka
+    command: "bash -c 'echo Waiting for Kafka to be ready... && \
+               cub kafka-ready -b kafka:9092 1 30 && \
+               kafka-topics --create --topic second.users --partitions 3 --replication-factor 1 --if-not-exists --bootstrap-server kafka:9092 && \
+               kafka-console-producer --bootstrap-server kafka:9092 -topic second.users < /data/message.json'"
